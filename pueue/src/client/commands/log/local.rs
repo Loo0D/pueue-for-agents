@@ -1,11 +1,11 @@
 use std::{
     fs::File,
-    io::{self, Stdout},
+    io::{self, Read, Stdout},
 };
 
 use crossterm::style::{Attribute, Color};
 use pueue_lib::{
-    log::{get_log_file_handle, seek_to_last_lines},
+    log::{get_log_file_handle, seek_to_log_bounds},
     settings::Settings,
 };
 
@@ -18,6 +18,8 @@ pub fn print_local_log(
     style: &OutputStyle,
     settings: &Settings,
     lines: Option<usize>,
+    max_bytes: Option<usize>,
+    head: bool,
 ) {
     let mut file = match get_log_file_handle(task_id, &settings.shared.pueue_directory()) {
         Ok(file) => file,
@@ -34,41 +36,55 @@ pub fn print_local_log(
         &mut stdout,
         &mut file,
         &lines,
+        &max_bytes,
+        &head,
         style.style_text("output:", Some(Color::Green), Some(Attribute::Bold)),
     );
 }
 
 /// Print a local log file of a task.
-fn print_local_file(stdout: &mut Stdout, file: &mut File, lines: &Option<usize>, header: String) {
+fn print_local_file(
+    stdout: &mut Stdout,
+    file: &mut File,
+    lines: &Option<usize>,
+    max_bytes: &Option<usize>,
+    head: &bool,
+    header: String,
+) {
     if let Ok(metadata) = file.metadata()
         && metadata.len() != 0
     {
-        // Indicates whether the full log output is shown or just the last part of it.
-        let mut output_complete = true;
-
-        // Only print the last lines if requested
-        if let Some(lines) = lines {
-            match seek_to_last_lines(file, *lines) {
-                Ok(complete) => output_complete = complete,
-                Err(err) => {
-                    eprintln!("Failed reading local log file: {err}");
-                    return;
-                }
+        // Seek before copying so the discarded portion never needs to be read.
+        let bounds = match seek_to_log_bounds(file, *lines, *max_bytes, *head) {
+            Ok(bounds) => bounds,
+            Err(err) => {
+                eprintln!("Failed reading local log file: {err}");
+                return;
             }
-        }
+        };
+        let output_complete = bounds.output_complete;
 
         // Add a hint if we should limit the output to X lines **and** there are actually more
         // lines than that given limit.
         let mut line_info = String::new();
         if !output_complete {
-            line_info = lines.map_or(String::new(), |lines| format!(" (last {lines} lines)"));
+            let direction = if *head { "first" } else { "last" };
+            let mut limits = Vec::new();
+            if let Some(lines) = lines {
+                limits.push(format!("{direction} {lines} lines"));
+            }
+            if let Some(max_bytes) = max_bytes {
+                limits.push(format!("{direction} {max_bytes} bytes"));
+            }
+            line_info = format!(" ({})", limits.join(", "));
         }
 
         // Print a newline between the task information and the first output.
         eprintln!("\n{header}{line_info}");
 
-        // Print everything
-        if let Err(err) = io::copy(file, stdout) {
+        // Print the selected portion.
+        let mut reader = file.take(bounds.read_limit.unwrap_or(u64::MAX));
+        if let Err(err) = io::copy(&mut reader, stdout) {
             eprintln!("Failed reading local log file: {err}");
         };
     }

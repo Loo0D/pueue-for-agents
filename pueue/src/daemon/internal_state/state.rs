@@ -1,7 +1,8 @@
 use std::{
     collections::BTreeMap,
-    fs::{File, read_to_string},
+    fs::{File, OpenOptions, read_to_string},
     io::{Read, Write},
+    path::Path,
     process::Child,
     sync::{Arc, Mutex, MutexGuard},
 };
@@ -84,6 +85,24 @@ impl PartialEq for InternalState {
     }
 }
 
+fn create_private_file(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        options.mode(0o600);
+        let file = options.open(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        Ok(file)
+    }
+
+    #[cfg(not(unix))]
+    options.open(path).map_err(Into::into)
+}
+
 impl InternalState {
     /// Create a new default state.
     pub fn new() -> InternalState {
@@ -148,6 +167,11 @@ impl InternalState {
         }
 
         self.groups_mut().remove(group);
+        for task in self.tasks_mut().values_mut() {
+            if task.group == group {
+                task.group = PUEUE_DEFAULT_GROUP.into();
+            }
+        }
 
         Ok(())
     }
@@ -257,18 +281,17 @@ impl InternalState {
         if settings.daemon.compress_state_file {
             temp = path.join("state.json.gz.partial");
             real = path.join("state.json.gz");
+        }
 
-            let file = if temp.exists() {
-                File::open(&temp)?
-            } else {
-                File::create(&temp)?
-            };
-
+        let file = create_private_file(&temp)?;
+        if settings.daemon.compress_state_file {
             let mut encoder = flate2::write::GzEncoder::new(file, Compression::default());
             encoder.write_all(serialized.as_bytes())?;
+            encoder.finish()?;
         } else {
             // Write to temporary log file first, to prevent loss due to crashes.
-            std::fs::write(&temp, serialized)
+            (&file)
+                .write_all(serialized.as_bytes())
                 .context("Failed to write temp file while saving state.")?;
         }
 

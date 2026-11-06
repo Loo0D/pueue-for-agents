@@ -1,7 +1,7 @@
-use std::path::PathBuf;
+use std::{ffi::OsString, path::PathBuf};
 
 use chrono::{TimeDelta, prelude::*};
-use clap::{ArgAction, Parser, ValueEnum, ValueHint};
+use clap::{ArgAction, CommandFactory, Parser, ValueEnum, ValueHint};
 use interim::*;
 use pueue_lib::message::Signal;
 
@@ -69,9 +69,10 @@ pub enum SubCommand {
         group: Option<String>,
 
         /// Start the task once all specified tasks have successfully finished.
+        /// Repeat this option or separate multiple task ids with commas.
         ///
         /// As soon as one of the dependencies fails, this task will fail as well.
-        #[arg(name = "after", short, long, num_args(1..))]
+        #[arg(name = "after", short, long, value_delimiter = ',')]
         dependencies: Vec<usize>,
 
         /// Start this task with a higher priority.
@@ -92,6 +93,29 @@ pub enum SubCommand {
         /// This is useful when working with dependencies in scripts.
         #[arg(short, long)]
         print_task_id: bool,
+
+        /// Inherit one environment variable by key or set an explicit KEY=VALUE pair.
+        /// Can be repeated.
+        #[arg(long = "env", value_name = "KEY[=VALUE]")]
+        environment: Vec<String>,
+
+        /// Inherit the complete client environment, including possible credentials.
+        #[arg(long)]
+        inherit_env: bool,
+    },
+    /// Atomically add a named dependency graph from JSON.
+    /// Reads stdin when no file is supplied or when the file is `-`.
+    AddBatch {
+        /// JSON document containing a top-level `tasks` array.
+        file: Option<PathBuf>,
+
+        /// Inherit or set an environment variable shared by every batch task.
+        #[arg(long = "env", value_name = "KEY[=VALUE]")]
+        environment: Vec<String>,
+
+        /// Inherit the complete client environment for every batch task.
+        #[arg(long)]
+        inherit_env: bool,
     },
     /// Remove tasks from the list.
     /// Running or paused tasks need to be killed first.
@@ -241,6 +265,18 @@ pub enum SubCommand {
         /// Edit the task before restarting.
         #[arg(short, long)]
         edit: bool,
+
+        /// Discard dependencies when creating replacement tasks.
+        #[arg(long)]
+        drop_dependencies: bool,
+
+        /// Restart all transitive dependents and remap dependencies to replacement tasks.
+        #[arg(long)]
+        with_dependents: bool,
+
+        /// Print only the resulting task ids, one per line.
+        #[arg(short = 'p', long)]
+        print_task_id: bool,
     },
 
     /// Either pause running tasks or specific groups of tasks.
@@ -326,6 +362,17 @@ pub enum SubCommand {
         cmd: Option<GroupCommand>,
     },
 
+    /// Display selected tasks as JSON without returning the rest of the queue.
+    Show {
+        /// The task ids to display.
+        #[arg(required = true)]
+        task_ids: Vec<usize>,
+
+        /// Include task environments, which may contain secrets.
+        #[arg(long)]
+        include_env: bool,
+    },
+
     /// Display the current status of all tasks.
     Status {
         /// Users can specify a custom query to filter for specific values, order by a column
@@ -382,10 +429,15 @@ https://github.com/Nukesor/pueue/issues/350#issue-1359083118"
         query: Vec<String>,
 
         /// Print the current state as json to stdout.
-        /// This does not include the output of tasks.
-        /// Use `log -j` if you want everything.
+        /// This does not include the output of tasks or task environments.
+        /// Use `log -j` if you want task output as well.
         #[arg(short, long)]
         json: bool,
+
+        /// Include task environments in JSON output.
+        /// Environments often contain secrets, so they are omitted by default.
+        #[arg(long, requires = "json")]
+        include_env: bool,
 
         #[arg(short, long)]
         /// Only show tasks of a specific group
@@ -421,6 +473,14 @@ https://github.com/Nukesor/pueue/issues/350#issue-1359083118"
         /// This is done by default if you're looking at multiple tasks.
         #[arg(short, long, conflicts_with = "full")]
         lines: Option<usize>,
+
+        /// Limit output to the last N bytes, or the first N bytes with `--head`.
+        #[arg(long, conflicts_with = "full")]
+        max_bytes: Option<usize>,
+
+        /// Select the beginning instead of the end when using `--lines` or `--max-bytes`.
+        #[arg(long, conflicts_with = "full")]
+        head: bool,
 
         /// Show the whole output.
         #[arg(short, long)]
@@ -467,6 +527,10 @@ https://github.com/Nukesor/pueue/issues/350#issue-1359083118"
         /// Wait for tasks to reach a specific task status.
         #[arg(short, long)]
         status: Option<WaitTargetStatus>,
+
+        /// Emit a final machine-readable result document instead of progress messages.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Remove all finished tasks from the list.
@@ -490,6 +554,10 @@ https://github.com/Nukesor/pueue/issues/350#issue-1359083118"
         /// Don't ask for any confirmation.
         #[arg(short, long)]
         force: bool,
+
+        /// Return before the reset has finished.
+        #[arg(long)]
+        no_wait: bool,
     },
 
     /// Remotely shut down the daemon. Should only be used if the daemon isn't started by a service
@@ -512,6 +580,9 @@ https://github.com/Nukesor/pueue/issues/350#issue-1359083118"
         #[arg(name = "group", short, long)]
         group: Option<String>,
     },
+
+    /// Display client/daemon versions and supported automation features as JSON.
+    Capabilities,
 
     /// Generates shell completion files.
     ///
@@ -619,6 +690,107 @@ pub struct CliArguments {
     pub cmd: Option<SubCommand>,
 }
 
+/// Reject option-like arguments that `add` would otherwise absorb into the command.
+///
+/// Clap's trailing positional arguments intentionally accept all remaining values. That is useful
+/// for shell commands, but silently turns a misplaced pueue option into part of the command. An
+/// explicit `--` remains available for commands whose own arguments start with a hyphen.
+pub fn validate_cli_args<I, T>(args: I) -> std::result::Result<(), clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let mut index = 1;
+
+    // Locate the subcommand while accounting for global options that take a separate value.
+    while let Some(arg) = args.get(index) {
+        let arg = arg.to_string_lossy();
+        match arg.as_ref() {
+            "--config" | "-c" | "--profile" | "-p" | "--color" => index += 2,
+            "add" => return validate_add_args(&args[index + 1..]),
+            _ if global_short_option_consumes_next(&arg) => index += 2,
+            _ if arg.starts_with('-') => index += 1,
+            _ => return Ok(()),
+        }
+    }
+
+    Ok(())
+}
+
+fn global_short_option_consumes_next(arg: &str) -> bool {
+    if !arg.starts_with('-') || arg.starts_with("--") {
+        return false;
+    }
+
+    for (index, option) in arg.char_indices().skip(1) {
+        match option {
+            'v' => continue,
+            'c' | 'p' => return index + option.len_utf8() == arg.len(),
+            _ => return false,
+        }
+    }
+
+    false
+}
+
+fn validate_add_args(args: &[OsString]) -> std::result::Result<(), clap::Error> {
+    let mut command_started = false;
+    let mut expects_value = false;
+
+    for arg in args {
+        let arg = arg.to_string_lossy();
+        if expects_value {
+            expects_value = false;
+            continue;
+        }
+
+        if arg == "--" {
+            break;
+        }
+
+        if !command_started {
+            if matches!(
+                arg.as_ref(),
+                "--working-directory"
+                    | "-w"
+                    | "--delay"
+                    | "-d"
+                    | "--group"
+                    | "-g"
+                    | "--after"
+                    | "-a"
+                    | "--priority"
+                    | "-o"
+                    | "--label"
+                    | "-l"
+                    | "--env"
+            ) {
+                expects_value = true;
+                continue;
+            }
+
+            if !arg.starts_with('-') {
+                command_started = true;
+            }
+            continue;
+        }
+
+        if arg.starts_with('-') {
+            return Err(CliArguments::command().error(
+                clap::error::ErrorKind::UnknownArgument,
+                format!(
+                    "option `{arg}` appears after the command. \
+                     Put pueue options before the command, or use \
+                     `pueue add [OPTIONS] -- <COMMAND>...` for command arguments."
+                ),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn parse_delay_until(src: &str) -> Result<DateTime<Local>, String> {
     if let Ok(seconds) = src.parse::<i64>() {
         let delay_until = Local::now()
@@ -634,4 +806,66 @@ fn parse_delay_until(src: &str) -> Result<DateTime<Local>, String> {
     Err(String::from(
         "could not parse as seconds or date expression",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_rejects_options_after_the_command() {
+        let error = validate_cli_args(["pueue", "add", "echo", "hello", "--stashed"])
+            .expect_err("a misplaced pueue option must be rejected");
+
+        assert!(error.to_string().contains("appears after the command"));
+    }
+
+    #[test]
+    fn add_validation_handles_clustered_global_options() {
+        let cases = [
+            vec!["pueue", "-vc", "/tmp/config", "add", "echo", "--stashed"],
+            vec!["pueue", "-vp", "dev", "add", "echo", "--stashed"],
+            vec!["pueue", "-vc/tmp/config", "add", "echo", "--stashed"],
+            vec!["pueue", "-vpdev", "add", "echo", "--stashed"],
+        ];
+
+        for args in cases {
+            validate_cli_args(args).expect_err("misplaced options must be rejected");
+        }
+    }
+
+    #[test]
+    fn add_accepts_command_options_after_a_separator() {
+        let args = [
+            "pueue",
+            "add",
+            "--after=1,2",
+            "--after",
+            "3",
+            "--stashed",
+            "--",
+            "echo",
+            "-n",
+        ];
+        validate_cli_args(args).unwrap();
+        let parsed = CliArguments::try_parse_from(args).unwrap();
+
+        let Some(SubCommand::Add {
+            command,
+            dependencies,
+            stashed,
+            ..
+        }) = parsed.cmd
+        else {
+            panic!("expected add subcommand");
+        };
+        assert_eq!(command, ["echo", "-n"]);
+        assert_eq!(dependencies, [1, 2, 3]);
+        assert!(stashed);
+    }
+
+    #[test]
+    fn add_keeps_the_existing_unseparated_form() {
+        validate_cli_args(["pueue", "add", "echo", "hello world"]).unwrap();
+    }
 }

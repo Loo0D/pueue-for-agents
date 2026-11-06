@@ -33,6 +33,10 @@ pub fn create_failure_response<T: ToString>(text: T) -> Response {
     Response::Failure(text.to_string())
 }
 
+pub fn create_partial_failure_response<T: ToString>(text: T) -> Response {
+    Response::PartialFailure(text.to_string())
+}
+
 /// Macro to simplify creating [From] implementations for each variant-contained
 /// Response; e.g. `impl_into_response!(AddRequest, Response::Add)` to implement
 /// use `AddedTaskResponse::into()` and get a [Response::AddedTask] value.
@@ -51,11 +55,15 @@ macro_rules! impl_into_response {
 #[derive(PartialEq, Eq, Clone, Debug, Deserialize, Serialize)]
 pub enum Response {
     AddedTask(AddedTaskResponse),
+    AddedBatch(AddedBatchResponse),
+    Capabilities(CapabilitiesResponse),
 
     /// The daemon locked the tasks and responds with the tasks' details.
     Edit(Vec<EditableTask>),
 
     Status(Box<State>),
+    /// Selected tasks, already redacted according to the request.
+    Tasks(BTreeMap<usize, Task>),
 
     /// The log returned from the daemon for a bunch of [`Task`]s
     /// This is the response to [`super::Request::Log`]
@@ -67,6 +75,8 @@ pub enum Response {
     Stream(StreamResponse),
 
     Success(String),
+    /// Some selected ids were processed, but at least one failed.
+    PartialFailure(String),
     Failure(String),
 
     /// Simply notify the client that the connection is now closed.
@@ -76,7 +86,10 @@ pub enum Response {
 
 impl Response {
     pub fn success(&self) -> bool {
-        matches!(&self, Self::AddedTask(_) | Self::Success(_))
+        matches!(
+            &self,
+            Self::AddedTask(_) | Self::AddedBatch(_) | Self::Success(_)
+        )
     }
 }
 
@@ -87,6 +100,22 @@ pub struct AddedTaskResponse {
     pub group_is_paused: bool,
 }
 impl_into_response!(AddedTaskResponse, Response::AddedTask);
+
+#[derive(PartialEq, Eq, Clone, Debug, Default, Deserialize, Serialize)]
+pub struct AddedBatchResponse {
+    pub task_ids: BTreeMap<String, usize>,
+}
+impl_into_response!(AddedBatchResponse, Response::AddedBatch);
+impl_into_response!(BTreeMap<usize, Task>, Response::Tasks);
+
+#[derive(PartialEq, Eq, Clone, Debug, Default, Deserialize, Serialize)]
+pub struct CapabilitiesResponse {
+    pub daemon_version: String,
+    pub protocol_version: String,
+    pub shell_source: String,
+    pub shell_command: Vec<String>,
+}
+impl_into_response!(CapabilitiesResponse, Response::Capabilities);
 
 /// Helper struct for sending tasks and their log output to the client.
 #[derive(PartialEq, Eq, Clone, Deserialize, Serialize)]

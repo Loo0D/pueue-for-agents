@@ -38,8 +38,38 @@ pub enum ProcessAction {
 
 /// Take a platform specific shell command and insert the actual task command via templating.
 pub fn compile_shell_command(settings: &Settings, command: &str) -> Command {
-    let shell_command = get_shell_command(settings);
+    compile_shell_command_with_parts(settings, command, get_shell_command(settings))
+}
 
+/// Execute a task with the user's captured shell unless an explicit daemon override exists.
+pub fn compile_task_shell_command(
+    settings: &Settings,
+    command: &str,
+    _envs: &HashMap<String, String>,
+) -> Command {
+    #[cfg(unix)]
+    if settings.daemon.shell_command.is_none()
+        && let Some(shell) = _envs.get("SHELL").filter(|shell| !shell.is_empty())
+    {
+        return compile_shell_command_with_parts(
+            settings,
+            command,
+            vec![
+                shell.clone(),
+                "-c".into(),
+                "{{ pueue_command_string }}".into(),
+            ],
+        );
+    }
+
+    compile_shell_command(settings, command)
+}
+
+fn compile_shell_command_with_parts(
+    settings: &Settings,
+    command: &str,
+    shell_command: Vec<String>,
+) -> Command {
     let mut handlebars = handlebars::Handlebars::new();
     handlebars.set_strict_mode(true);
     handlebars.register_escape_fn(handlebars::no_escape);

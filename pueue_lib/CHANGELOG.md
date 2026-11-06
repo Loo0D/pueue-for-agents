@@ -6,7 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 This project adheres **somewhat** to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The concept of SemVer is applied to the daemon/client API, but not the library API itself.
 
-## [0.31.2] - unreleased
+## [0.31.2-for-agents.1] - unreleased
+
+### Change
+
+- Add atomic named batch submission and daemon capability requests with server-side shell details.
+- Add selected-task requests and server-redacted status responses to avoid transmitting environments.
+- Add head/tail and byte bounds to log requests and partial-failure responses for multi-ID operations.
 
 ## [0.31.1] - 2026-03-02
 

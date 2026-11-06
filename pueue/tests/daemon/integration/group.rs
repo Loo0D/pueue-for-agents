@@ -52,30 +52,48 @@ async fn test_cannot_delete_non_existing() -> Result<()> {
     Ok(())
 }
 
-/// Groups with tasks shouldn't be able to be removed.
+/// Removing a group moves inactive tasks to the default group.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_cannot_delete_group_with_tasks() -> Result<()> {
+async fn test_delete_moves_tasks_to_default() -> Result<()> {
     let daemon = daemon().await?;
     let shared = &daemon.settings.shared;
 
-    // Add a new group
     add_group_with_slots(shared, "testgroup", 1).await?;
-
-    // Add a task
     assert_success(add_task_to_group(shared, "ls", "testgroup").await?);
-    wait_for_task_condition(&daemon.settings.shared, 0, Task::is_done).await?;
+    wait_for_task_condition(shared, 0, Task::is_done).await?;
 
-    // We shouldn't be capable of removing that group
-    let message = GroupRequest::Remove("testgroup".to_string());
-    assert_failure(send_request(shared, message).await?);
+    let mut message = create_add_message(shared, "echo next");
+    message.group = "testgroup".into();
+    message.stashed = true;
+    assert_success(send_request(shared, message).await?);
 
-    // Remove the task from the group
-    let remove_message = Request::Remove(vec![0]);
-    send_request(shared, remove_message).await?;
-
-    // Removal should now work.
     let message = GroupRequest::Remove("testgroup".to_string());
     assert_success(send_request(shared, message).await?);
+
+    let state = get_state(shared).await?;
+    assert!(!state.groups.contains_key("testgroup"));
+    assert_eq!(state.tasks.len(), 2);
+    assert!(state.tasks.values().all(|task| task.group == "default"));
+
+    Ok(())
+}
+
+/// A running task still needs its group's worker pool and cannot be moved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_cannot_delete_group_with_running_task() -> Result<()> {
+    let daemon = daemon().await?;
+    let shared = &daemon.settings.shared;
+
+    add_group_with_slots(shared, "testgroup", 1).await?;
+    let mut message = create_add_message(shared, "sleep 60");
+    message.group = "testgroup".into();
+    message.start_immediately = true;
+    assert_success(send_request(shared, message).await?);
+    wait_for_task_condition(shared, 0, Task::is_running).await?;
+
+    let message = GroupRequest::Remove("testgroup".to_string());
+    assert_failure(send_request(shared, message).await?);
+    assert_eq!(get_state(shared).await?.tasks[&0].group, "testgroup");
 
     Ok(())
 }

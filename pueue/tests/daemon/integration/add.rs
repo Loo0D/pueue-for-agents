@@ -55,6 +55,25 @@ async fn test_stashed_add() -> Result<()> {
     Ok(())
 }
 
+/// Persisted task environments must not be readable by other users.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_private_state_file() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let daemon = daemon().await?;
+    let shared = &daemon.settings.shared;
+    let mut message = create_add_message(shared, "echo test");
+    message.stashed = true;
+    assert_success(send_request(shared, message).await?);
+
+    let state_path = shared.pueue_directory().join("state.json");
+    let mode = std::fs::metadata(state_path)?.permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+
+    Ok(())
+}
+
 /// Pause the default group and make sure that immediately spawning a task still works.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_add_with_immediate_start() -> Result<()> {

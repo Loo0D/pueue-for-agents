@@ -157,9 +157,9 @@ pub struct Daemon {
     /// The command that should be used for task and callback execution.
     /// The following are the only officially supported modi for Pueue.
     ///
-    /// Unix default:
+    /// Unix tasks use the `SHELL` captured when they are added, falling back to `sh`:
     /// ```
-    /// vec!["sh", "-c", "{{ pueue_command_string }}"];
+    /// vec!["$SHELL", "-c", "{{ pueue_command_string }}"];
     /// ````
     ///
     /// Windows default:

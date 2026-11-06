@@ -58,9 +58,15 @@ pub fn group(settings: &Settings, state: &SharedState, message: GroupRequest) ->
                 return failure_msg!("You cannot delete the default group");
             }
 
-            // Make sure there are no tasks in that group.
-            if state.tasks().iter().any(|(_, task)| task.group == group) {
-                return failure_msg!("You cannot remove a group, if there're still tasks in it.");
+            // Running tasks cannot be moved between worker pools.
+            if state
+                .tasks()
+                .iter()
+                .any(|(_, task)| task.group == group && task.is_running())
+            {
+                return failure_msg!(
+                    "You cannot remove a group while it still contains running or paused tasks."
+                );
             }
 
             // Make sure the worker pool exists and is empty.

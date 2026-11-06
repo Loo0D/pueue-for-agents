@@ -8,7 +8,13 @@ use super::OutputStyle;
 use crate::internal_prelude::*;
 
 /// Prints log output received from the daemon.
-pub fn print_remote_log(task_log: &TaskLogResponse, style: &OutputStyle, lines: Option<usize>) {
+pub fn print_remote_log(
+    task_log: &TaskLogResponse,
+    style: &OutputStyle,
+    lines: Option<usize>,
+    max_bytes: Option<usize>,
+    head: bool,
+) {
     if let Some(bytes) = task_log.output.as_ref()
         && !bytes.is_empty()
     {
@@ -16,7 +22,15 @@ pub fn print_remote_log(task_log: &TaskLogResponse, style: &OutputStyle, lines: 
         // lines than that given limit.
         let mut line_info = String::new();
         if !task_log.output_complete {
-            line_info = lines.map_or(String::new(), |lines| format!(" (last {lines} lines)"));
+            let direction = if head { "first" } else { "last" };
+            let mut limits = Vec::new();
+            if let Some(lines) = lines {
+                limits.push(format!("{direction} {lines} lines"));
+            }
+            if let Some(max_bytes) = max_bytes {
+                limits.push(format!("{direction} {max_bytes} bytes"));
+            }
+            line_info = format!(" ({})", limits.join(", "));
         }
 
         // Print a newline between the task information and the first output.

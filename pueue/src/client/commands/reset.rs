@@ -1,4 +1,7 @@
-use pueue_lib::{Client, message::*};
+use std::time::Duration;
+
+use pueue_lib::{Client, GroupStatus, message::*};
+use tokio::time::sleep;
 
 use super::{handle_response, handle_user_confirmation};
 use crate::{
@@ -14,6 +17,7 @@ pub async fn reset(
     style: &OutputStyle,
     force: bool,
     groups: Vec<String>,
+    no_wait: bool,
 ) -> Result<()> {
     // Get the current state and check if there're any running tasks.
     // If there are, ask the user if they really want to reset the state.
@@ -46,6 +50,20 @@ pub async fn reset(
 
     client.send_request(ResetRequest { target }).await?;
     let response = client.receive_response().await?;
+    handle_response(style, response)?;
 
-    handle_response(style, response)
+    if !no_wait {
+        loop {
+            let state = get_state(client).await?;
+            let resetting = groups.iter().any(|name| {
+                state.groups.get(name).map(|group| group.status) == Some(GroupStatus::Reset)
+            });
+            if !resetting {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    Ok(())
 }

@@ -98,6 +98,8 @@ async fn test_partial_log() -> Result<()> {
         tasks: TaskSelection::TaskIds(vec![0]),
         send_logs: true,
         lines: Some(5),
+        max_bytes: None,
+        head: false,
     };
     let response = send_request(shared, Request::Log(log_message)).await?;
     let logs = match response {
@@ -135,6 +137,8 @@ async fn test_correct_log_order() -> Result<()> {
         tasks: TaskSelection::TaskIds(vec![0]),
         send_logs: true,
         lines: None,
+        max_bytes: None,
+        head: false,
     };
     let response = send_request(shared, Request::Log(log_message)).await?;
     let logs = match response {
@@ -152,6 +156,24 @@ async fn test_correct_log_order() -> Result<()> {
 
     // Make sure it's the same
     assert_eq!(output, "test\nerror\ntest\n");
+
+    Ok(())
+}
+
+/// Task output may contain secrets and must not be readable by other users.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_private_log_file() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let daemon = daemon().await?;
+    let shared = &daemon.settings.shared;
+    assert_success(add_task(shared, "echo secret").await?);
+    wait_for_task_condition(shared, 0, Task::is_done).await?;
+
+    let log_path = shared.pueue_directory().join("task_logs").join("0.log");
+    let mode = std::fs::metadata(log_path)?.permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
 
     Ok(())
 }
@@ -178,6 +200,8 @@ async fn logs_of_group() -> Result<()> {
         tasks: TaskSelection::Group("test_2".to_string()),
         send_logs: true,
         lines: None,
+        max_bytes: None,
+        head: false,
     };
     let response = send_request(shared, message).await?;
     let logs = match response {
@@ -212,6 +236,8 @@ async fn logs_for_all() -> Result<()> {
         tasks: TaskSelection::All,
         send_logs: true,
         lines: None,
+        max_bytes: None,
+        head: false,
     };
     let response = send_request(shared, message).await?;
     let logs = match response {

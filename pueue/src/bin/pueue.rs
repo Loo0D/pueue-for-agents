@@ -10,7 +10,7 @@ use color_eyre::{
     eyre::{WrapErr, bail},
 };
 use pueue::client::{
-    cli::{CliArguments, ColorChoice, Shell, SubCommand},
+    cli::{CliArguments, ColorChoice, Shell, SubCommand, validate_cli_args},
     handle_command,
     style::OutputStyle,
 };
@@ -31,6 +31,7 @@ use pueue_lib::{
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     // Parse commandline options.
+    validate_cli_args(std::env::args_os()).unwrap_or_else(|error| error.exit());
     let opt = CliArguments::parse();
 
     // Init the logger and set the verbosity level depending on the `-v` flags.
@@ -65,6 +66,7 @@ async fn main() -> Result<()> {
     // If no subcommand is given, we default to the `status` subcommand without any arguments.
     let subcommand = opt.cmd.unwrap_or(SubCommand::Status {
         json: false,
+        include_env: false,
         group: None,
         query: Vec::new(),
     });
@@ -83,6 +85,8 @@ async fn main() -> Result<()> {
         SubCommand::Status { json, .. } => !json,
         SubCommand::Log { json, .. } => !json,
         SubCommand::Group { json, .. } => !json,
+        SubCommand::Wait { json, .. } => !json,
+        SubCommand::AddBatch { .. } | SubCommand::Show { .. } | SubCommand::Capabilities => false,
         _ => true,
     };
 

@@ -119,11 +119,21 @@ async fn json() -> Result<()> {
     let deserialized_state: State =
         serde_json::from_str(&json).context("Failed to deserialize json state")?;
 
+    assert!(deserialized_state.tasks[&0].envs.is_empty());
     let state = get_state(shared).await?;
+    let mut expected_state = (*state).clone();
+    for task in expected_state.tasks.values_mut() {
+        task.envs.clear();
+    }
     assert_eq!(
-        deserialized_state, *state,
-        "Json state differs from actual daemon state."
+        deserialized_state, expected_state,
+        "Redacted JSON state differs from actual daemon state."
     );
+
+    let output = run_client_command(shared, &["status", "--json", "--include-env"])?;
+    let json = String::from_utf8_lossy(&output.stdout);
+    let unredacted_state: State = serde_json::from_str(&json)?;
+    assert_eq!(unredacted_state, *state);
 
     Ok(())
 }

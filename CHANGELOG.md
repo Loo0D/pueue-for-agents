@@ -4,9 +4,47 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## \[4.0.5\] - unreleased
+## \[4.0.5-for-agents.1\] - unreleased
+
+### Change
+
+- `pueue add` rejects options placed after the command instead of silently appending them to it.
+  Put Pueue options first and use `--` before command arguments that start with a hyphen.
+- Unix tasks use the `SHELL` captured from the client, falling back to `sh` when it is unset.
+  An explicitly configured `daemon.shell_command` still takes precedence.
+- `--after` accepts repeated options and comma-separated task ids without consuming the command.
+- `pueue wait` returns a non-zero exit code when any waited-for task finishes unsuccessfully.
+- `pueue status --json` omits task environments by default. Use `--include-env` to include them.
+- `pueue kill` removes explicitly selected queued and stashed tasks instead of failing.
+- Removing a group moves its inactive tasks to the default group, as documented.
+- Reading logs for a task that never ran explains that no output is available instead of reporting
+  a missing-file error.
+- `pueue add` captures a minimal environment by default. Use repeated `--env KEY[=VALUE]` options
+  for selected variables or `--inherit-env` for the legacy full snapshot.
+- `pueue wait --json` emits per-task outcomes. Missing and disappearing explicitly selected task
+  ids now fail instead of producing a successful empty wait.
+- Multi-ID operations return a non-zero exit code on partial failure while still processing valid
+  ids.
+- Replacement-task restarts preserve dependencies unless `--drop-dependencies` is specified and
+  support `--print-task-id` for newly allocated ids. `--with-dependents` recursively restarts and
+  reconnects a task graph.
+- `pueue reset` waits for completion by default; `--no-wait` retains asynchronous behavior.
+- `pueue add-batch` atomically adds a validated named dependency graph from a JSON document.
+- `pueue show` returns selected tasks as secret-free JSON by default. Selected-task and redacted
+  status responses are sanitized by the daemon before transmission. `pueue capabilities` reports
+  client, daemon and protocol versions plus supported automation features.
+- `pueue log --max-bytes` bounds log output by bytes; `--head` selects the beginning instead of
+  the default tail for line and byte limits. JSON logs expose `output_complete` and preserve
+  trailing newlines.
 
 ### Fix
+
+- Non-interactive confirmation prompts abort cleanly when standard input is closed.
+- Verbose client tracing no longer serializes command payloads, including inline environment values.
+- Tail-line selection handles zero-line requests and unterminated final lines correctly.
+- Failed batch persistence rolls back inserted tasks before releasing the daemon state lock.
+- Failed-to-spawn logs retain their diagnostics and identify the selected shell and task command.
+- State and task log files are created and maintained with owner-only (`0600`) permissions on Unix.
 
 - Minor bug where the daemon secret and certificate were world readable for a split second during first startup and initialization.
 - Don't log invalid authentication secrets

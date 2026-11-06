@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::Local;
 use color_eyre::eyre::ContextCompat;
@@ -31,6 +31,9 @@ pub async fn restart(
     in_place: bool,
     not_in_place: bool,
     edit: bool,
+    drop_dependencies: bool,
+    with_dependents: bool,
+    print_task_id: bool,
 ) -> Result<()> {
     // `not_in_place` superseeds both other configs
     let in_place = (settings.client.restart_in_place || in_place) && !not_in_place;
@@ -53,7 +56,7 @@ pub async fn restart(
     //
     // Otherwise, use the provided ids and check which of them were "Done"
     // (successful or failed tasks).
-    let filtered_tasks = if all_failed || failed_in_group.is_some() {
+    let mut filtered_tasks = if all_failed || failed_in_group.is_some() {
         // Either all failed tasks or all failed tasks of a specific group need to be restarted.
 
         // First we have to get all finished tasks (Done)
@@ -91,6 +94,25 @@ pub async fn restart(
         state.filter_tasks(done_filter, Some(task_ids))
     };
 
+    if with_dependents {
+        let mut selected: BTreeSet<usize> = filtered_tasks.matching_ids.iter().copied().collect();
+        let mut pending: Vec<usize> = selected.iter().copied().collect();
+        while let Some(task_id) = pending.pop() {
+            for (dependent_id, task) in &state.tasks {
+                if task.dependencies.contains(&task_id) && selected.insert(*dependent_id) {
+                    pending.push(*dependent_id);
+                }
+            }
+        }
+
+        let selected: Vec<usize> = selected.into_iter().collect();
+        let previous_non_matching = filtered_tasks.non_matching_ids;
+        filtered_tasks = state.filter_tasks(done_filter, Some(selected));
+        filtered_tasks
+            .non_matching_ids
+            .extend(previous_non_matching);
+    }
+
     // Build a RestartMessage, if the tasks should be replaced instead of creating a copy of the
     // original task. This is only important, if replace is `True`.
     let mut restart_message = RestartRequest {
@@ -123,6 +145,8 @@ pub async fn restart(
     }
 
     // Go through all restartable commands we found and process them.
+    let mut restarted_ids = Vec::new();
+    let mut replacement_ids = BTreeMap::new();
     for (_, mut task) in tasks {
         task.status = new_status.clone();
 
@@ -143,6 +167,24 @@ pub async fn restart(
         // In case we don't do in-place restarts, we have to add a new task.
         // Create an request to send the task to the daemon from the updated info and the old
         // task.
+        let original_task_id = task.id;
+        let dependencies = if drop_dependencies {
+            Vec::new()
+        } else {
+            task.dependencies
+                .iter()
+                .map(|dependency| {
+                    if with_dependents {
+                        replacement_ids
+                            .get(dependency)
+                            .copied()
+                            .unwrap_or(*dependency)
+                    } else {
+                        *dependency
+                    }
+                })
+                .collect()
+        };
         let add_task_message = AddRequest {
             command: task.original_command,
             path: task.path,
@@ -151,31 +193,46 @@ pub async fn restart(
             stashed,
             group: task.group.clone(),
             enqueue_at: None,
-            dependencies: Vec::new(),
+            dependencies,
             priority: Some(task.priority),
             label: task.label,
         };
 
         // Send the cloned task to the daemon and abort on any failure messages.
         client.send_request(add_task_message).await?;
-        if let Response::Failure(message) = client.receive_response().await? {
-            bail!(message);
-        };
+        match client.receive_response().await? {
+            Response::AddedTask(response) => {
+                replacement_ids.insert(original_task_id, response.task_id);
+                restarted_ids.push(response.task_id);
+            }
+            Response::Failure(message) => bail!(message),
+            response => bail!("Unexpected response while restarting a task: {response:?}"),
+        }
     }
 
     // Send the singular in-place restart message to the daemon.
     if in_place {
         client.send_request(restart_message).await?;
-        if let Response::Failure(message) = client.receive_response().await? {
+        if let Response::Failure(message) | Response::PartialFailure(message) =
+            client.receive_response().await?
+        {
             bail!(message);
         };
     }
 
-    if !filtered_tasks.matching_ids.is_empty() {
+    if in_place {
+        restarted_ids = filtered_tasks.matching_ids.clone();
+    }
+
+    if print_task_id {
+        for task_id in &restarted_ids {
+            println!("{task_id}");
+        }
+    } else if !filtered_tasks.matching_ids.is_empty() {
         println!("Restarted tasks: {:?}", filtered_tasks.matching_ids);
     }
     if !filtered_tasks.non_matching_ids.is_empty() {
-        eprintln!(
+        bail!(
             "Couldn't restart tasks: {:?}",
             filtered_tasks.non_matching_ids
         );

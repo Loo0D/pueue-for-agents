@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     time::Duration,
 };
 
@@ -11,6 +11,7 @@ use pueue_lib::{
     state::State,
     task::{Task, TaskResult, TaskStatus},
 };
+use serde::Serialize;
 use strum::{Display, EnumString};
 use tokio::time::sleep;
 
@@ -34,6 +35,19 @@ pub enum WaitTargetStatus {
     Running,
 }
 
+#[derive(Serialize)]
+struct WaitOutput {
+    schema_version: u8,
+    success: bool,
+    tasks: BTreeMap<usize, WaitTaskOutput>,
+}
+
+#[derive(Serialize)]
+struct WaitTaskOutput {
+    result: String,
+    exit_code: Option<i32>,
+}
+
 /// Wait until tasks are done.
 /// Tasks can be specified by:
 /// - Default queue (no parameter given)
@@ -43,6 +57,7 @@ pub enum WaitTargetStatus {
 ///
 /// By default, this will output status changes of tasks to `stdout`.
 /// Pass `quiet == true` to suppress any logging.
+#[allow(clippy::too_many_arguments)]
 pub async fn wait(
     client: &mut Client,
     style: &OutputStyle,
@@ -51,8 +66,10 @@ pub async fn wait(
     all: bool,
     quiet: bool,
     target_status: Option<WaitTargetStatus>,
+    json: bool,
 ) -> Result<()> {
     let selection = selection_from_params(all, group, task_ids);
+    let mut results = BTreeMap::new();
 
     let mut first_run = true;
     // Create a list of tracked tasks.
@@ -60,6 +77,9 @@ pub async fn wait(
     let mut watched_tasks: HashMap<usize, TaskStatus> = HashMap::new();
     // Since tasks can be removed by users, we have to track tasks that actually finished.
     let mut finished_tasks: HashSet<usize> = HashSet::new();
+    // `Done` includes unsuccessful results, which must be reflected in the process exit code.
+    let mut failed_tasks: HashSet<usize> = HashSet::new();
+    let quiet = quiet || json;
 
     // Wait for either a provided target status or the default (`Done`).
     let target_status = target_status.clone().unwrap_or_default();
@@ -67,9 +87,26 @@ pub async fn wait(
         let state = get_state(client).await?;
         let tasks = get_tasks(&state, &selection);
 
+        if first_run && let TaskSelection::TaskIds(task_ids) = &selection {
+            for task_id in task_ids {
+                if !state.tasks.contains_key(task_id) {
+                    failed_tasks.insert(*task_id);
+                    results.insert(*task_id, missing_task_output());
+                }
+            }
+        }
+
         if tasks.is_empty() {
-            eprintln!("No tasks found for selection {selection:?}");
-            return Ok(());
+            if let TaskSelection::TaskIds(_) = &selection {
+                for task_id in watched_tasks.keys() {
+                    failed_tasks.insert(*task_id);
+                    results.insert(*task_id, missing_task_output());
+                }
+                watched_tasks.clear();
+            } else if !quiet {
+                eprintln!("No tasks found for selection {selection:?}");
+            }
+            return respond(json, failed_tasks, results);
         }
 
         // Iterate over all matching tasks
@@ -109,12 +146,20 @@ pub async fn wait(
         for task_id in task_ids {
             // Get the correct task. If it no longer exists, remove it from the task list.
             let Some(task) = tasks.iter().find(|task| task.id == task_id) else {
+                if matches!(&selection, TaskSelection::TaskIds(_)) {
+                    failed_tasks.insert(task_id);
+                    results.insert(task_id, missing_task_output());
+                }
                 watched_tasks.remove(&task_id);
                 continue;
             };
 
             // Check if the task hit the target status.
             if reached_target_status(task, &target_status) {
+                if target_status == WaitTargetStatus::Done && task.failed() {
+                    failed_tasks.insert(task_id);
+                }
+                results.insert(task_id, task_output(task));
                 watched_tasks.remove(&task_id);
                 finished_tasks.insert(task_id);
             }
@@ -122,7 +167,14 @@ pub async fn wait(
             // If we're waiting for `Success`ful tasks, check if any of the tasks failed.
             // If so, exit with a `1`.
             if target_status == WaitTargetStatus::Success && task.failed() {
-                std::process::exit(1);
+                if json {
+                    failed_tasks.insert(task_id);
+                    results.insert(task_id, task_output(task));
+                    watched_tasks.remove(&task_id);
+                    finished_tasks.insert(task_id);
+                } else {
+                    std::process::exit(1);
+                }
             }
         }
 
@@ -138,6 +190,76 @@ pub async fn wait(
         }
         sleep(Duration::from_millis(sleep_time)).await;
         first_run = false;
+    }
+
+    respond(json, failed_tasks, results)
+}
+
+fn task_output(task: &Task) -> WaitTaskOutput {
+    match &task.status {
+        TaskStatus::Done { result, .. } => match result {
+            TaskResult::Success => WaitTaskOutput {
+                result: "success".into(),
+                exit_code: Some(0),
+            },
+            TaskResult::Failed(exit_code) => WaitTaskOutput {
+                result: "failed".into(),
+                exit_code: Some(*exit_code),
+            },
+            TaskResult::DependencyFailed => WaitTaskOutput {
+                result: "dependency_failed".into(),
+                exit_code: None,
+            },
+            TaskResult::FailedToSpawn(_) => WaitTaskOutput {
+                result: "failed_to_spawn".into(),
+                exit_code: None,
+            },
+            TaskResult::Errored => WaitTaskOutput {
+                result: "errored".into(),
+                exit_code: None,
+            },
+            TaskResult::Killed => WaitTaskOutput {
+                result: "killed".into(),
+                exit_code: None,
+            },
+        },
+        status => WaitTaskOutput {
+            result: status.to_string().to_lowercase(),
+            exit_code: None,
+        },
+    }
+}
+
+fn missing_task_output() -> WaitTaskOutput {
+    WaitTaskOutput {
+        result: "missing".into(),
+        exit_code: None,
+    }
+}
+
+fn respond(
+    json: bool,
+    failed_tasks: HashSet<usize>,
+    results: BTreeMap<usize, WaitTaskOutput>,
+) -> Result<()> {
+    let success = failed_tasks.is_empty();
+    if json {
+        let output = WaitOutput {
+            schema_version: 1,
+            success,
+            tasks: results,
+        };
+        println!("{}", serde_json::to_string(&output).unwrap());
+        if !success {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if !success {
+        let mut failed_tasks: Vec<usize> = failed_tasks.into_iter().collect();
+        failed_tasks.sort_unstable();
+        bail!("One or more tasks did not succeed: {failed_tasks:?}");
     }
 
     Ok(())

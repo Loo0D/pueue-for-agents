@@ -4,7 +4,7 @@ use chrono::prelude::*;
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, VariantNames};
 
-use crate::message::EditableTask;
+use crate::{message::EditableTask, state::PUEUE_DEFAULT_GROUP};
 
 /// Macro to simplify creating [From] implementations for each variant-contained
 /// Request; e.g. `impl_into_request!(AddRequest, Request::Add)` to make it possible
@@ -25,6 +25,8 @@ macro_rules! impl_into_request {
 pub enum Request {
     /// Add a new task to the daemon.
     Add(AddRequest),
+    /// Atomically add a named dependency graph.
+    AddBatch(AddBatchRequest),
     /// Remove non-running/paused tasks.
     Remove(Vec<usize>),
     /// Switch two enqueued/stashed tasks.
@@ -63,8 +65,14 @@ pub enum Request {
     /// Used to set parallel tasks for a specific group
     Parallel(ParallelRequest),
 
-    /// Request the daemon's state
+    /// Report daemon and protocol versions for capability discovery.
+    Capabilities,
+    /// Request the daemon's complete state for trusted internal operations.
     Status,
+    /// Request the daemon's state with all task environments removed before transmission.
+    RedactedStatus,
+    /// Request selected tasks with optional environment inclusion.
+    Tasks(TasksRequest),
     /// Request logs of a set of tasks.
     Log(LogRequest),
 
@@ -124,6 +132,46 @@ impl std::fmt::Debug for AddRequest {
     }
 }
 impl_into_request!(AddRequest, Request::Add);
+
+#[derive(PartialEq, Eq, Clone, Deserialize, Serialize)]
+pub struct AddBatchRequest {
+    pub tasks: Vec<AddBatchTask>,
+    pub envs: HashMap<String, String>,
+}
+
+impl std::fmt::Debug for AddBatchRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AddBatchRequest")
+            .field("tasks", &self.tasks)
+            .field("envs", &"hidden")
+            .finish()
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddBatchTask {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub path: PathBuf,
+    #[serde(default = "default_batch_group")]
+    pub group: String,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub stashed: bool,
+    #[serde(default)]
+    pub priority: Option<i32>,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+fn default_batch_group() -> String {
+    PUEUE_DEFAULT_GROUP.into()
+}
+
+impl_into_request!(AddBatchRequest, Request::AddBatch);
 
 #[derive(PartialEq, Eq, Clone, Debug, Deserialize, Serialize)]
 pub struct SwitchRequest {
@@ -288,6 +336,13 @@ pub struct StreamRequest {
 }
 impl_into_request!(StreamRequest, Request::Stream);
 
+#[derive(PartialEq, Eq, Clone, Debug, Deserialize, Serialize)]
+pub struct TasksRequest {
+    pub task_ids: Vec<usize>,
+    pub include_env: bool,
+}
+impl_into_request!(TasksRequest, Request::Tasks);
+
 /// Request logs for specific tasks.
 ///
 /// `tasks` specifies the requested tasks.
@@ -298,6 +353,8 @@ pub struct LogRequest {
     pub tasks: TaskSelection,
     pub send_logs: bool,
     pub lines: Option<usize>,
+    pub max_bytes: Option<usize>,
+    pub head: bool,
 }
 impl_into_request!(LogRequest, Request::Log);
 

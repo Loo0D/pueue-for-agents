@@ -107,6 +107,8 @@ pub async fn assert_worker_envs(
             tasks: TaskSelection::TaskIds(vec![task_id]),
             send_logs: true,
             lines: None,
+            max_bytes: None,
+            head: false,
         },
     )
     .await?;

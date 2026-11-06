@@ -1,5 +1,9 @@
 # Pueue
 
+**Pueue for Agents** (`4.0.5-for-agents.1`) is an agent-oriented fork with explicit shell
+selection, secret-minimal environment capture, structured outcomes, atomic dependency graphs,
+and bounded log inspection.
+
 [![Test Build](https://github.com/Nukesor/pueue/actions/workflows/test.yml/badge.svg)](https://github.com/Nukesor/pueue/actions/workflows/test.yml)
 [![Crates.io](https://img.shields.io/crates/v/pueue)](https://crates.io/crates/pueue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -139,10 +143,11 @@ Commands:
                      There're many different options when scheduling a task.
                      Check the individual option help texts for more information.
 
-                     Furthermore, please remember that scheduled commands are executed via your system shell.
-                     This means that the command needs proper shell escaping.
-                     The safest way to preserve shell escaping is to surround your command with quotes, for example:
-                     pueue add 'ls $HOME && echo "Some string"'
+                     Furthermore, please remember that scheduled commands use the captured user shell on Unix
+                     unless daemon.shell_command is configured. This means that commands need proper shell escaping.
+                     The safest way to preserve shell escaping is to use an option separator and quote the command:
+                     pueue add -- 'ls $HOME && echo "Some string"'
+  add-batch      Atomically add a named dependency graph from JSON.
   remove         Remove tasks from the list. Running or paused tasks need to be killed first
   switch         Switches the queue position of two commands. Only works on queued and stashed commands
   stash          Stashed tasks won't be automatically started. You have to enqueue them or start them by hand
@@ -164,6 +169,7 @@ Commands:
                      Multiple properties can be added in one go.
   group          Use this to add or remove groups.
                      By default, this will simply display all known groups.
+  show           Display selected tasks as JSON without returning the rest of the queue
   status         Display the current status of all tasks
   format-status  Accept a list or map of JSON pueue tasks via stdin and display it just like "pueue status".
                      A simple example might look like this:
@@ -183,6 +189,7 @@ Commands:
                      By default, adjusts the amount of the default group.
                      No tasks will be stopped, if this is lowered.
                      This limit is only considered when tasks are scheduled.
+  capabilities   Display client/daemon versions and supported automation features as JSON
   completions    Generates shell completion files. This can be ignored during normal operations
   help           Print this message or the help of the given subcommand(s)
 

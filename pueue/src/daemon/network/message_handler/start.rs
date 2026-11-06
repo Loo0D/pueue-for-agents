@@ -33,7 +33,10 @@ pub fn start(settings: &Settings, state: &SharedState, message: StartRequest) ->
         TaskSelection::All => success_msg!("All groups are being resumed."),
     };
 
-    if let Response::Success(_) = response {
+    if matches!(
+        &response,
+        Response::Success(_) | Response::PartialFailure(_)
+    ) {
         process_handler::start::start(settings, &mut state, message.tasks);
     }
 

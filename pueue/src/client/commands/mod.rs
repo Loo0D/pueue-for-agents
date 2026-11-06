@@ -17,6 +17,8 @@ use pueue_lib::{
 use crate::internal_prelude::*;
 
 mod add;
+mod add_batch;
+mod capabilities;
 mod clean;
 mod edit;
 mod enqueue;
@@ -31,6 +33,7 @@ mod remove;
 mod reset;
 mod restart;
 mod send;
+mod show;
 mod shutdown;
 mod start;
 mod stash;
@@ -39,6 +42,8 @@ mod switch;
 mod wait;
 
 use add::add_task;
+use add_batch::add_batch;
+use capabilities::capabilities;
 use clean::clean;
 use edit::edit;
 use enqueue::enqueue;
@@ -53,6 +58,7 @@ use remove::remove;
 use reset::reset;
 use restart::restart;
 use send::send;
+use show::show;
 use shutdown::shutdown;
 use start::start;
 use stash::stash;
@@ -99,13 +105,16 @@ fn group_or_default(group: &Option<String>) -> String {
 // This is a helper function for easy retrieval of the current daemon state.
 // The current daemon state is often needed in more complex commands.
 pub async fn get_state(client: &mut Client) -> Result<State> {
-    // Create the message payload and send it to the daemon.
-    client.send_request(Request::Status).await?;
+    get_state_with_request(client, Request::Status).await
+}
 
-    // Check if we can receive the response from the daemon
-    let response = client.receive_response().await?;
+pub async fn get_redacted_state(client: &mut Client) -> Result<State> {
+    get_state_with_request(client, Request::RedactedStatus).await
+}
 
-    match response {
+async fn get_state_with_request(client: &mut Client, request: Request) -> Result<State> {
+    client.send_request(request).await?;
+    match client.receive_response().await? {
         Response::Status(state) => Ok(*state),
         _ => unreachable!(),
     }
@@ -135,7 +144,7 @@ pub async fn get_task(client: &mut Client, task_id: usize) -> Result<Option<Task
 fn handle_response(style: &OutputStyle, response: Response) -> Result<()> {
     match response {
         Response::Success(text) => print_success(style, &text),
-        Response::Failure(text) => {
+        Response::Failure(text) | Response::PartialFailure(text) => {
             print_error(style, &text);
             std::process::exit(1);
         }
@@ -156,7 +165,8 @@ pub async fn handle_command(
     style: &OutputStyle,
     subcommand: SubCommand,
 ) -> Result<()> {
-    trace!(message = "Handling command", subcommand = ?subcommand);
+    // Do not serialize command payloads here: environment options can contain credentials.
+    trace!(message = "Handling command");
 
     match subcommand {
         SubCommand::Add {
@@ -171,6 +181,8 @@ pub async fn handle_command(
             priority,
             label,
             print_task_id,
+            environment,
+            inherit_env,
             follow,
         } => {
             add_task(
@@ -188,10 +200,18 @@ pub async fn handle_command(
                 priority,
                 label,
                 print_task_id,
+                environment,
+                inherit_env,
                 follow,
             )
             .await
         }
+        SubCommand::AddBatch {
+            file,
+            environment,
+            inherit_env,
+        } => add_batch(client, file, environment, inherit_env).await,
+        SubCommand::Capabilities => capabilities(client).await,
         SubCommand::Clean {
             successful_only,
             group,
@@ -220,10 +240,12 @@ pub async fn handle_command(
             all,
             json,
             lines,
+            max_bytes,
+            head,
             full,
         } => {
             print_logs(
-                client, settings, style, task_ids, group, all, json, lines, full,
+                client, settings, style, task_ids, group, all, json, lines, max_bytes, head, full,
             )
             .await
         }
@@ -238,7 +260,11 @@ pub async fn handle_command(
             wait,
         } => pause(client, style, task_ids, group, all, wait).await,
         SubCommand::Remove { task_ids } => remove(client, settings, style, task_ids).await,
-        SubCommand::Reset { force, groups } => reset(client, style, force, groups).await,
+        SubCommand::Reset {
+            force,
+            groups,
+            no_wait,
+        } => reset(client, style, force, groups, no_wait).await,
         SubCommand::Restart {
             task_ids,
             all_failed,
@@ -248,6 +274,9 @@ pub async fn handle_command(
             in_place,
             not_in_place,
             edit,
+            drop_dependencies,
+            with_dependents,
+            print_task_id,
         } => {
             restart(
                 client,
@@ -260,6 +289,9 @@ pub async fn handle_command(
                 in_place,
                 not_in_place,
                 edit,
+                drop_dependencies,
+                with_dependents,
+                print_task_id,
             )
             .await
         }
@@ -276,9 +308,16 @@ pub async fn handle_command(
             group,
             all,
         } => start(client, style, task_ids, group, all).await,
-        SubCommand::Status { query, json, group } => {
-            state(client, settings, style, query, json, group).await
-        }
+        SubCommand::Show {
+            task_ids,
+            include_env,
+        } => show(client, task_ids, include_env).await,
+        SubCommand::Status {
+            query,
+            json,
+            group,
+            include_env,
+        } => state(client, settings, style, query, json, group, include_env).await,
         SubCommand::Switch {
             task_id_1,
             task_id_2,
@@ -289,7 +328,8 @@ pub async fn handle_command(
             all,
             quiet,
             status,
-        } => wait(client, style, task_ids, group, all, quiet, status).await,
+            json,
+        } => wait(client, style, task_ids, group, all, quiet, status, json).await,
         _ => bail!("unhandled WIP"),
     }
 }
@@ -311,9 +351,12 @@ pub fn handle_user_confirmation(action: &str, task_ids: &[usize]) -> Result<()> 
         print!("Do you want to continue [Y/n]: ");
         stdout().flush()?;
         input.clear();
-        stdin().read_line(&mut input)?;
+        if stdin().read_line(&mut input)? == 0 {
+            bail!("Confirmation input was closed; aborting.")
+        }
 
-        match input.chars().next().unwrap() {
+        // A read of at least one byte always yields a character for terminal-generated input.
+        match input.chars().next().unwrap_or('\0') {
             'N' | 'n' => {
                 eprintln!("Aborted!");
                 std::process::exit(1);

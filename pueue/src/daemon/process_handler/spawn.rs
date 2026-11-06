@@ -11,7 +11,7 @@ use crate::{
     daemon::{callbacks::spawn_callback, internal_state::state::LockedState},
     internal_prelude::*,
     ok_or_shutdown,
-    process_helper::compile_shell_command,
+    process_helper::compile_task_shell_command,
 };
 
 /// See if we can start a new queued task.
@@ -139,7 +139,7 @@ pub fn spawn_process(settings: &Settings, state: &mut LockedState, task_id: usiz
     };
 
     // Get all necessary info for starting the task
-    let (command, path, group, mut envs) = {
+    let (task_command, path, group, mut envs) = {
         let task = state.tasks().get(&task_id).unwrap();
         (
             task.command.clone(),
@@ -150,7 +150,7 @@ pub fn spawn_process(settings: &Settings, state: &mut LockedState, task_id: usiz
     };
 
     // Build the shell command that should be executed.
-    let mut command = compile_shell_command(settings, &command);
+    let mut command = compile_task_shell_command(settings, &task_command, &envs);
 
     // Determine the worker's id depending on the current group.
     // Inject that info into the environment.
@@ -179,6 +179,7 @@ pub fn spawn_process(settings: &Settings, state: &mut LockedState, task_id: usiz
 
     // Spawn the actual subprocess
     let command_debug = format!("{command:?}");
+    let shell = command.get_program().to_string_lossy().into_owned();
     let mut command = CommandWrap::from(command);
     #[cfg(unix)]
     {
@@ -194,7 +195,9 @@ pub fn spawn_process(settings: &Settings, state: &mut LockedState, task_id: usiz
     let child = match spawned_command {
         Ok(child) => child,
         Err(err) => {
-            let error_msg = format!("Failed to spawn child {task_id} with err: {err:?}");
+            let error_msg = format!(
+                "Failed to spawn task {task_id} using shell `{shell}` for command `{task_command}`: {err:?}"
+            );
             error!(?err, "Failed to spawn child {task_id}");
             trace!(command = command_debug, "Command that failed");
 

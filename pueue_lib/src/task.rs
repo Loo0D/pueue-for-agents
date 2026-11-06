@@ -122,6 +122,15 @@ impl Task {
         matches!(self.status, TaskStatus::Done { .. })
     }
 
+    /// Whether this task can have output from a spawned process.
+    pub fn has_process_log(&self) -> bool {
+        match &self.status {
+            TaskStatus::Running { .. } | TaskStatus::Paused { .. } => true,
+            TaskStatus::Done { result, .. } => !matches!(result, TaskResult::DependencyFailed),
+            _ => false,
+        }
+    }
+
     /// Check if the task errored. \
     /// It either:
     /// 1. Finished successfully

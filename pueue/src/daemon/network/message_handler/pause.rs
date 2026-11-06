@@ -28,7 +28,10 @@ pub fn pause(settings: &Settings, state: &SharedState, message: PauseRequest) ->
     };
 
     // Actually execute the command
-    if let Response::Success(_) = response {
+    if matches!(
+        &response,
+        Response::Success(_) | Response::PartialFailure(_)
+    ) {
         process_handler::pause::pause(settings, &mut state, message.tasks, message.wait);
     }
 

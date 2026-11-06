@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use pueue_lib::Task;
 
 use crate::{client::helper::*, internal_prelude::*};
@@ -25,6 +27,76 @@ async fn set_environment() -> Result<()> {
     let output = run_client_command(shared, &["follow", "0"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!("thisisatest", stdout.trim());
+
+    Ok(())
+}
+
+/// Task environments inherit only explicitly selected non-default variables by default.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn selective_environment_inheritance() -> Result<()> {
+    let daemon = daemon().await?;
+    let shared = &daemon.settings.shared;
+    let envs = HashMap::from([
+        ("PUEUE_AGENT_SECRET", "do-not-copy"),
+        ("PUEUE_AGENT_SELECTED", "selected"),
+    ]);
+
+    run_client_command_with_env(
+        shared,
+        &[
+            "add",
+            "--stashed",
+            "--env",
+            "PUEUE_AGENT_SELECTED",
+            "echo test",
+        ],
+        envs.clone(),
+    )?
+    .success()?;
+    run_client_command_with_env(
+        shared,
+        &["add", "--stashed", "--inherit-env", "echo test"],
+        envs.clone(),
+    )?
+    .success()?;
+    run_client_command_with_env(
+        shared,
+        &[
+            "add",
+            "--stashed",
+            "--env",
+            "PUEUE_AGENT_SET=value",
+            "echo test",
+        ],
+        envs.clone(),
+    )?
+    .success()?;
+
+    let state = get_state(shared).await?;
+    assert_eq!(state.tasks[&0].envs["PUEUE_AGENT_SELECTED"], "selected");
+    assert!(!state.tasks[&0].envs.contains_key("PUEUE_AGENT_SECRET"));
+    assert_eq!(state.tasks[&1].envs["PUEUE_AGENT_SECRET"], "do-not-copy");
+    assert_eq!(state.tasks[&2].envs["PUEUE_AGENT_SET"], "value");
+    assert!(!state.tasks[&2].envs.contains_key("PUEUE_AGENT_SECRET"));
+
+    let output = run_client_command(shared, &["add", "--env", "PUEUE_AGENT_MISSING", "echo"])?;
+    assert!(!output.status.success());
+    assert_eq!(get_state(shared).await?.tasks.len(), 3);
+
+    let output = run_client_command_with_env(
+        shared,
+        &[
+            "-vvvv",
+            "add",
+            "--stashed",
+            "--env",
+            "TRACE_SECRET=trace-secret",
+            "echo test",
+        ],
+        envs,
+    )?
+    .success()?;
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("trace-secret"));
 
     Ok(())
 }

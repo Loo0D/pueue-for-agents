@@ -90,6 +90,77 @@ async fn test_kill_tasks_with_pause(
     Ok(())
 }
 
+/// Killing an explicitly selected pending task removes it instead of reporting an error.
+#[rstest]
+#[case(true)]
+#[case(false)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_kill_pending_task(#[case] stashed: bool) -> Result<()> {
+    let daemon = daemon().await?;
+    let shared = &daemon.settings.shared;
+
+    if !stashed {
+        pause_tasks(shared, TaskSelection::All).await?;
+    }
+    let mut message = create_add_message(shared, "sleep 60");
+    message.stashed = stashed;
+    assert_success(send_request(shared, message).await?);
+
+    let response = send_request(
+        shared,
+        KillRequest {
+            tasks: TaskSelection::TaskIds(vec![0]),
+            signal: None,
+        },
+    )
+    .await?;
+    assert_success(response);
+    wait_for_task_absence(shared, 0).await?;
+    assert!(get_state(shared).await?.tasks.is_empty());
+
+    Ok(())
+}
+
+/// A mixed kill considers running dependents when checking queued-parent removal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_kill_pending_parent_and_running_dependent() -> Result<()> {
+    let daemon = daemon().await?;
+    let shared = &daemon.settings.shared;
+
+    let mut parent = create_add_message(shared, "echo parent");
+    parent.stashed = true;
+    assert_success(send_request(shared, parent).await?);
+    let mut child = create_add_message(shared, "sleep 60");
+    child.stashed = true;
+    child.dependencies = vec![0];
+    assert_success(send_request(shared, child).await?);
+    assert_success(start_tasks(shared, TaskSelection::TaskIds(vec![1])).await?);
+    wait_for_task_condition(shared, 1, Task::is_running).await?;
+
+    let response = send_request(
+        shared,
+        KillRequest {
+            tasks: TaskSelection::TaskIds(vec![0, 1]),
+            signal: None,
+        },
+    )
+    .await?;
+    assert_success(response);
+    assert!(!get_state(shared).await?.tasks.contains_key(&0));
+    wait_for_task_condition(shared, 1, |task| {
+        matches!(
+            task.status,
+            TaskStatus::Done {
+                result: TaskResult::Killed,
+                ..
+            }
+        )
+    })
+    .await?;
+
+    Ok(())
+}
+
 /// This test ensures the following rule:
 /// If a whole group or everything is killed, the respective groups should not be paused, as long
 /// as there's no further queued task in that group.

@@ -1,4 +1,6 @@
-use pueue_lib::{Settings, Task, TaskStatus, log::clean_log_handles, message::*};
+use pueue_lib::{
+    Settings, Task, TaskStatus, log::clean_log_handles, message::*, state::FilteredTasks,
+};
 
 use super::ok_or_failure_message;
 use crate::{
@@ -11,7 +13,19 @@ use crate::{
 /// We have to ensure that those tasks aren't running!
 pub fn remove(settings: &Settings, state: &SharedState, task_ids: Vec<usize>) -> Response {
     let mut state = state.lock().unwrap();
+    let filtered_tasks = remove_tasks(settings, &mut state, task_ids, &[]);
 
+    ok_or_save_state_failure!(state.save(settings));
+
+    compile_task_response("Tasks removed from list", filtered_tasks)
+}
+
+pub(super) fn remove_tasks(
+    settings: &Settings,
+    state: &mut crate::daemon::internal_state::state::LockedState,
+    task_ids: Vec<usize>,
+    additional_removals: &[usize],
+) -> FilteredTasks {
     // Filter all running tasks, since we cannot remove them.
     let filter = |task: &Task| {
         matches!(
@@ -25,9 +39,15 @@ pub fn remove(settings: &Settings, state: &SharedState, task_ids: Vec<usize>) ->
     let mut filtered_tasks = state.filter_tasks(filter, Some(task_ids));
 
     // Don't delete tasks, if there are other tasks that depend on this one.
-    // However, we allow to delete those tasks, if they're supposed to be deleted as well.
+    // However, also account for running dependents that are being killed by the same request.
+    let removal_set: Vec<usize> = filtered_tasks
+        .matching_ids
+        .iter()
+        .chain(additional_removals)
+        .copied()
+        .collect();
     for task_id in filtered_tasks.matching_ids.clone() {
-        if !state.is_task_removable(&task_id, &filtered_tasks.matching_ids) {
+        if !state.is_task_removable(&task_id, &removal_set) {
             filtered_tasks.non_matching_ids.push(task_id);
             filtered_tasks.matching_ids.retain(|id| id != &task_id);
         };
@@ -39,9 +59,7 @@ pub fn remove(settings: &Settings, state: &SharedState, task_ids: Vec<usize>) ->
         clean_log_handles(*task_id, &settings.shared.pueue_directory());
     }
 
-    ok_or_save_state_failure!(state.save(settings));
-
-    compile_task_response("Tasks removed from list", filtered_tasks)
+    filtered_tasks
 }
 
 #[cfg(test)]
@@ -58,9 +76,9 @@ mod tests {
         // The rest will succeed.
         let response = remove(&settings, &state, vec![0, 1, 2, 3, 4]);
 
-        // Response is correct
-        assert!(matches!(response, Response::Success(_)));
-        if let Response::Success(text) = response {
+        // Response reports partial failure even though valid tasks were removed.
+        assert!(matches!(response, Response::PartialFailure(_)));
+        if let Response::PartialFailure(text) = response {
             assert_eq!(
                 text,
                 "Tasks removed from list: 0, 1, 2\nThe command failed for tasks: 3, 4"

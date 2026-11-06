@@ -24,6 +24,8 @@ pub async fn get_task_log(shared: &Shared, task_id: usize, lines: Option<usize>)
         tasks: TaskSelection::TaskIds(vec![task_id]),
         send_logs: true,
         lines,
+        max_bytes: None,
+        head: false,
     };
     let response = send_request(shared, message).await?;
 

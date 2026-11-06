@@ -1,6 +1,6 @@
 use pueue_lib::{
     Group, Response, Task,
-    message::{create_failure_response, create_success_response},
+    message::{create_failure_response, create_partial_failure_response, create_success_response},
     state::FilteredTasks,
 };
 
@@ -80,8 +80,9 @@ pub fn compile_task_response(message: &str, filtered_tasks: FilteredTasks) -> Re
         return create_failure_response(format!("{mismatched_message}: {mismatching_ids}"));
     }
 
-    // Some ids were valid, some were invalid.
-    create_success_response(format!(
+    // Some ids succeeded, but callers must receive a failed response whenever any requested id
+    // failed. Otherwise scripts would need to parse human-readable output to detect partial failure.
+    create_partial_failure_response(format!(
         "{message}: {matching_ids}\n{mismatched_message}: {mismatching_ids}",
     ))
 }

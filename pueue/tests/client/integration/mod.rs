@@ -1,3 +1,4 @@
+mod add_batch;
 mod completions;
 mod configuration;
 mod edit;
@@ -5,6 +6,9 @@ mod env;
 mod follow;
 mod group;
 mod log;
+mod partial_failure;
+mod reset;
 mod restart;
+mod show;
 mod status;
 mod wait;

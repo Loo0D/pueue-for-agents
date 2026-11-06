@@ -9,7 +9,11 @@ use pueue_lib::{
 };
 
 use crate::{
-    client::{commands::get_state, display_helper::get_group_headline, style::OutputStyle},
+    client::{
+        commands::{get_redacted_state, get_state},
+        display_helper::get_group_headline,
+        style::OutputStyle,
+    },
     internal_prelude::*,
 };
 
@@ -27,8 +31,18 @@ pub async fn state(
     query: Vec<String>,
     json: bool,
     group: Option<String>,
+    include_env: bool,
 ) -> Result<()> {
-    let state = get_state(client).await?;
+    let mut state = if include_env {
+        get_state(client).await?
+    } else {
+        get_redacted_state(client).await?
+    };
+    if json && !include_env {
+        for task in state.tasks.values_mut() {
+            task.envs.clear();
+        }
+    }
     let tasks = state.tasks.values().cloned().collect();
 
     let output = print_state(state, tasks, style, &settings, json, group, Some(query))?;

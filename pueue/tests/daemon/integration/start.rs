@@ -85,3 +85,16 @@ async fn test_start_stashed_tasks() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_partial_start_still_starts_valid_tasks() -> Result<()> {
+    let daemon = daemon().await?;
+    let shared = &daemon.settings.shared;
+    assert_success(create_stashed_task(shared, "sleep 60", None).await?);
+
+    let response = start_tasks(shared, TaskSelection::TaskIds(vec![0, 999])).await?;
+    assert!(matches!(response, Response::PartialFailure(_)));
+    wait_for_task_condition(shared, 0, Task::is_running).await?;
+
+    Ok(())
+}

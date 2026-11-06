@@ -26,11 +26,13 @@ pub fn get_log(settings: &Settings, state: &SharedState, message: LogRequest) ->
             // We send log output and the task at the same time.
             // This isn't as efficient as sending the raw compressed data directly,
             // but it's a lot more convenient for now.
-            let (output, output_complete) = if message.send_logs {
+            let (output, output_complete) = if message.send_logs && task.has_process_log() {
                 match read_and_compress_log_file(
                     *task_id,
                     &settings.shared.pueue_directory(),
                     message.lines,
+                    message.max_bytes,
+                    message.head,
                 ) {
                     Ok((output, output_complete)) => (Some(output), output_complete),
                     Err(err) => {

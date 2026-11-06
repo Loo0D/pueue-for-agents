@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 use pueue_lib::{
-    Settings, failure_msg,
+    PROTOCOL_VERSION, Settings, failure_msg,
     message::*,
     network::{protocol::send_response, socket::GenericStream},
 };
@@ -9,9 +9,11 @@ use pueue_lib::{
 use crate::{
     daemon::{internal_state::SharedState, process_handler::initiate_shutdown},
     internal_prelude::*,
+    process_helper::get_shell_command,
 };
 
 mod add;
+mod add_batch;
 mod clean;
 mod edit;
 mod enqueue;
@@ -60,6 +62,7 @@ pub async fn handle_request(
             return Ok(());
         }
         Request::Add(message) => add::add_task(settings, state, message),
+        Request::AddBatch(message) => add_batch::add_batch(settings, state, message),
         Request::Clean(message) => clean::clean(settings, state, message),
         Request::EditedTasks(editable_tasks) => edit::edit(settings, state, editable_tasks),
         Request::EditRequest(task_ids) => edit::edit_request(state, task_ids),
@@ -78,7 +81,10 @@ pub async fn handle_request(
         Request::Start(message) => start::start(settings, state, message),
         Request::Stash(message) => stash::stash(settings, state, message),
         Request::Switch(message) => switch::switch(settings, state, message),
-        Request::Status => get_status(state),
+        Request::Capabilities => get_capabilities(settings),
+        Request::Status => get_status(state, true),
+        Request::RedactedStatus => get_status(state, false),
+        Request::Tasks(message) => get_tasks(state, message),
     };
 
     send_response(response, stream).await?;
@@ -88,9 +94,61 @@ pub async fn handle_request(
 
 /// Invoked when calling `pueue status`.
 /// Return the current state.
-fn get_status(state: &SharedState) -> Response {
+fn get_status(state: &SharedState, include_env: bool) -> Response {
     let state = state.lock().unwrap().clone();
-    Response::Status(Box::new(state.inner))
+    let mut inner = state.inner;
+    if !include_env {
+        for task in inner.tasks.values_mut() {
+            task.envs.clear();
+        }
+    }
+    Response::Status(Box::new(inner))
+}
+
+fn get_tasks(state: &SharedState, message: TasksRequest) -> Response {
+    let state = state.lock().unwrap();
+    let mut tasks = std::collections::BTreeMap::new();
+    for task_id in message.task_ids {
+        let Some(task) = state.tasks().get(&task_id) else {
+            return failure_msg!("Task {task_id} not found");
+        };
+        let mut task = task.clone();
+        if !message.include_env {
+            task.envs.clear();
+        }
+        tasks.insert(task_id, task);
+    }
+    Response::Tasks(tasks)
+}
+
+fn get_capabilities(settings: &Settings) -> Response {
+    let (shell_source, shell_command) = if settings.daemon.shell_command.is_some() {
+        ("daemon_configuration", get_shell_command(settings))
+    } else {
+        #[cfg(unix)]
+        {
+            (
+                "task_shell_environment",
+                vec![
+                    "$SHELL".into(),
+                    "-c".into(),
+                    "{{ pueue_command_string }}".into(),
+                ],
+            )
+        }
+        #[cfg(not(unix))]
+        {
+            ("platform_default", get_shell_command(settings))
+        }
+    };
+
+    CapabilitiesResponse {
+        daemon_version: env!("CARGO_PKG_VERSION").into(),
+        protocol_version: PROTOCOL_VERSION.into(),
+        shell_source: shell_source.into(),
+        shell_command,
+    }
+    .into()
 }
 
 fn ok_or_failure_message<T, E: Display>(result: Result<T, E>) -> Result<T, Response> {

@@ -114,6 +114,91 @@ async fn single_task_target_status() -> Result<()> {
     Ok(())
 }
 
+/// Default completion waits must signal unsuccessful task results to scripts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn done_failure() -> Result<()> {
+    let daemon = daemon().await?;
+    let shared = &daemon.settings.shared;
+
+    run_client_command(shared, &["add", "--stashed", "exit 7"])?;
+    run_client_command(shared, &["start", "0"])?;
+    let output = run_client_command(shared, &["wait", "0", "--quiet"])?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("One or more tasks did not succeed: [0]"));
+
+    Ok(())
+}
+
+/// JSON waits return a structured verdict for every selected task.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn json_results() -> Result<()> {
+    let daemon = daemon().await?;
+    let shared = &daemon.settings.shared;
+
+    run_client_command(shared, &["add", "exit 7"])?;
+    run_client_command(shared, &["add", "--after=0", "echo unreachable"])?;
+    let output = run_client_command(shared, &["wait", "--json", "0", "1"])?;
+    assert!(!output.status.success());
+
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(result["schema_version"], 1);
+    assert_eq!(result["success"], false);
+    assert_eq!(result["tasks"]["0"]["result"], "failed");
+    assert_eq!(result["tasks"]["0"]["exit_code"], 7);
+    assert_eq!(result["tasks"]["1"]["result"], "dependency_failed");
+
+    Ok(())
+}
+
+/// Explicitly selecting an unknown task is an error, not a successful empty wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_task() -> Result<()> {
+    let daemon = daemon().await?;
+    let shared = &daemon.settings.shared;
+
+    let output = run_client_command(shared, &["wait", "--json", "999"])?;
+    assert!(!output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(result["success"], false);
+    assert_eq!(result["tasks"]["999"]["result"], "missing");
+
+    Ok(())
+}
+
+/// A missing ID must not abandon valid tasks that are still being watched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_known_and_missing_tasks() -> Result<()> {
+    let daemon = daemon().await?;
+    let shared = &daemon.settings.shared;
+    run_client_command(shared, &["add", "echo known"])?;
+
+    let output = run_client_command(shared, &["wait", "--json", "0", "999"])?;
+    assert!(!output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(result["tasks"]["0"]["result"], "success");
+    assert_eq!(result["tasks"]["999"]["result"], "missing");
+
+    Ok(())
+}
+
+/// Removing an explicitly watched task before completion must fail the wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watched_task_disappears() -> Result<()> {
+    let daemon = daemon().await?;
+    let shared = &daemon.settings.shared;
+
+    run_client_command(shared, &["add", "--stashed", "echo test"])?;
+    let wait_handle = spawn_wait_client(shared, vec!["wait", "--quiet", "0"]).await;
+    run_client_command(shared, &["remove", "0"])?;
+
+    let output = wait_handle.join().unwrap()?;
+    assert!(!output.status.success());
+
+    Ok(())
+}
+
 /// Test that `wait success` will correctly wait for successful tasks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn success_success() -> Result<()> {

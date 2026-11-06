@@ -24,3 +24,34 @@ async fn test_isolated_task_environment() -> Result<()> {
     child.kill()?;
     Ok(())
 }
+
+/// Without a daemon override, a task uses the shell captured from its client environment.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_task_uses_captured_shell() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (mut settings, tempdir) = daemon_base_setup()?;
+    settings.daemon.shell_command = None;
+    let custom_shell = tempdir.path().join("custom-shell");
+    std::fs::write(
+        &custom_shell,
+        "#!/bin/sh\nprintf 'custom-shell\\n'\nexec /bin/sh -c \"$2\"\n",
+    )?;
+    std::fs::set_permissions(&custom_shell, std::fs::Permissions::from_mode(0o700))?;
+    settings.save(&Some(tempdir.path().join("pueue.yml")))?;
+    let daemon = daemon_with_settings(settings, tempdir).await?;
+    let shared = &daemon.settings.shared;
+
+    let mut message = create_add_message(shared, "echo task-output");
+    message
+        .envs
+        .insert("SHELL".into(), custom_shell.to_string_lossy().into_owned());
+    assert_success(send_request(shared, message).await?);
+    wait_for_task_condition(shared, 0, Task::is_done).await?;
+
+    let log = get_task_log(shared, 0, None).await?;
+    assert_eq!(log, "custom-shell\ntask-output\n");
+
+    Ok(())
+}

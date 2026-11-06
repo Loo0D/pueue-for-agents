@@ -227,3 +227,66 @@ async fn restart_edit_with_alias() -> Result<()> {
 
     Ok(())
 }
+
+/// Replacement tasks retain dependencies unless explicitly dropped and report their new ids.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replacement_dependencies_and_ids() -> Result<()> {
+    let daemon = daemon().await?;
+    let shared = &daemon.settings.shared;
+
+    run_client_command(shared, &["add", "failing_command"])?;
+    run_client_command(shared, &["add", "--after=0", "echo dependent"])?;
+    wait_for_task_condition(shared, 1, Task::is_done).await?;
+
+    let output =
+        run_client_command(shared, &["restart", "--stashed", "--print-task-id", "1"])?.success()?;
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "2");
+    assert_eq!(get_state(shared).await?.tasks[&2].dependencies, [0]);
+
+    let output = run_client_command(
+        shared,
+        &[
+            "restart",
+            "--stashed",
+            "--drop-dependencies",
+            "--print-task-id",
+            "1",
+        ],
+    )?
+    .success()?;
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "3");
+    assert!(get_state(shared).await?.tasks[&3].dependencies.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_transitive_dependents_remaps_dependencies() -> Result<()> {
+    let daemon = daemon().await?;
+    let shared = &daemon.settings.shared;
+
+    run_client_command(shared, &["add", "failing_command"])?;
+    run_client_command(shared, &["add", "--after=0", "echo child"])?;
+    run_client_command(shared, &["add", "--after=1", "echo grandchild"])?;
+    wait_for_task_condition(shared, 2, Task::is_done).await?;
+
+    let output = run_client_command(
+        shared,
+        &[
+            "restart",
+            "--stashed",
+            "--with-dependents",
+            "--print-task-id",
+            "0",
+        ],
+    )?
+    .success()?;
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "3\n4\n5");
+
+    let state = get_state(shared).await?;
+    assert!(state.tasks[&3].dependencies.is_empty());
+    assert_eq!(state.tasks[&4].dependencies, [3]);
+    assert_eq!(state.tasks[&5].dependencies, [4]);
+
+    Ok(())
+}

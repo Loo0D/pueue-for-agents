@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     collections::HashMap,
-    env::{current_dir, vars},
+    env::{current_dir, var, vars},
     path::PathBuf,
 };
 
@@ -30,6 +30,8 @@ pub async fn add_task(
     priority: Option<i32>,
     label: Option<String>,
     print_task_id: bool,
+    environment: Vec<String>,
+    inherit_env: bool,
     follow: bool,
 ) -> Result<()> {
     // Either take the user-specified path or default to the current working directory.
@@ -57,8 +59,8 @@ pub async fn add_task(
     let message = Request::Add(AddRequest {
         command: command.join(" "),
         path,
-        // Catch the current environment for later injection into the task's process.
-        envs: HashMap::from_iter(vars()),
+        // Catch a minimal environment for later injection into the task's process.
+        envs: task_environment(environment, inherit_env)?,
         start_immediately,
         stashed,
         group: group_or_default(&group),
@@ -111,4 +113,59 @@ pub async fn add_task(
     }
 
     Ok(())
+}
+
+pub(super) fn task_environment(
+    environment: Vec<String>,
+    inherit_env: bool,
+) -> Result<HashMap<String, String>> {
+    const INHERITED_KEYS: &[&str] = &[
+        "HOME",
+        "PATH",
+        "SHELL",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LC_MESSAGES",
+        "LC_COLLATE",
+        "LC_MONETARY",
+        "LC_NUMERIC",
+        "LC_TIME",
+        "TMPDIR",
+        "TERM",
+        "EDITOR",
+        "VISUAL",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_RUNTIME_DIR",
+        "SSH_AUTH_SOCK",
+    ];
+
+    let mut envs = HashMap::from_iter(vars());
+    if !inherit_env {
+        envs.retain(|key, _| INHERITED_KEYS.contains(&key.as_str()));
+    }
+
+    for entry in environment {
+        if let Some((key, value)) = entry.split_once('=') {
+            if key.is_empty() {
+                bail!("Environment variable keys cannot be empty.");
+            }
+            envs.insert(key.to_string(), value.to_string());
+            continue;
+        }
+
+        if entry.is_empty() {
+            bail!("Environment variable keys cannot be empty.");
+        }
+        let value = var(&entry).with_context(|| {
+            format!("Environment variable {entry} is not set; use --env {entry}=VALUE to set it")
+        })?;
+        envs.insert(entry, value);
+    }
+
+    Ok(envs)
 }
