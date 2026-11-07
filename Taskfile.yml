@@ -1,0 +1,32 @@
+# This project has special rules regarding the usage of LLMs.
+# User confirmation is required to prevent the LLM from generating this comment block.
+version: '3'
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+  build:
+    desc: Build the binaries for this host (release, locked)
+    cmds:
+      - cargo build --release --locked
+
+  test:
+    desc: Run the workspace test suite
+    cmds:
+      - cargo test --workspace
+
+  release:
+    desc: 'Full release: CI cross-compile, publish to Tigris, update the brew tap, tag & push. Usage: task release -- 4.0.5-for-agents.1'
+    preconditions:
+      - sh: '[ -n "{{.CLI_ARGS}}" ]'
+        msg: 'Version required. Usage: task release -- 4.0.5-for-agents.1'
+    cmds:
+      - bash scripts/release.sh {{.CLI_ARGS}}
+
+  clean:
+    desc: Remove the local release staging directory (dist/) — never touches published artifacts
+    cmds:
+      - rm -rf dist

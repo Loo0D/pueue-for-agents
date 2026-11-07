@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - "v*.*.*"
+    # Fork releases are built by release.yml; this upstream workflow would only
+    # duplicate them with a different asset naming scheme.
+    tags-ignore:
+      - "v*-for-agents*"
 
 jobs:
   publish:
