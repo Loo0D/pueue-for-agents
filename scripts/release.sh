@@ -82,6 +82,13 @@ cd "$REPO_ROOT"
 git rev-parse --git-dir >/dev/null 2>&1 || die "$REPO_ROOT is not a git repo"
 git remote get-url origin >/dev/null 2>&1 || die "no git origin in $REPO_ROOT"
 
+# gh resolves this clone to the *upstream* repo by default (it treats a fork's
+# parent as the default), so every API call is pinned explicitly.
+ORIGIN_URL="$(git remote get-url origin)"
+REPO_NWO="$(printf '%s' "$ORIGIN_URL" | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')"
+printf '%s' "$REPO_NWO" | grep -qE '^[^/]+/[^/]+$' \
+  || die "cannot derive OWNER/REPO from origin '$ORIGIN_URL'"
+
 # The artifacts are labelled with the version baked into the binaries at compile
 # time (CARGO_PKG_VERSION), so a release argument that disagrees would publish
 # mislabelled files.
@@ -126,8 +133,8 @@ if [ -z "$RUN_ID" ]; then
   # --- Locate the CI run for this commit -------------------------------------
   note "--- Waiting for the '$WORKFLOW' run for $HEAD_SHA ---"
   for _ in $(seq 1 36); do
-    RUN_ID="$(gh run list --workflow "$WORKFLOW" --commit "$HEAD_SHA" --event push \
-      --limit 1 --json databaseId --jq '.[0].databaseId // empty' 2>/dev/null || true)"
+    RUN_ID="$(gh run list --repo "$REPO_NWO" --workflow "$WORKFLOW" --commit "$HEAD_SHA" \
+      --event push --limit 1 --json databaseId --jq '.[0].databaseId // empty' 2>/dev/null || true)"
     [ -n "$RUN_ID" ] && break
     sleep 5
   done
@@ -136,19 +143,19 @@ else
   note "--- Reusing CI run $RUN_ID (skipping tag/push) ---"
 fi
 
-note "  run: $(gh run view "$RUN_ID" --json url --jq .url)"
+note "  run: $(gh run view "$RUN_ID" --repo "$REPO_NWO" --json url --jq .url)"
 
 # --- Wait for the build -------------------------------------------------------
 DEADLINE=$(( $(date +%s) + 3600 ))
 while :; do
-  STATUS="$(gh run view "$RUN_ID" --json status --jq .status)"
+  STATUS="$(gh run view "$RUN_ID" --repo "$REPO_NWO" --json status --jq .status)"
   [ "$STATUS" = "completed" ] && break
   [ "$(date +%s)" -lt "$DEADLINE" ] || die "CI run $RUN_ID still '$STATUS' after 60 minutes"
   sleep 20
 done
-CONCLUSION="$(gh run view "$RUN_ID" --json conclusion --jq .conclusion)"
+CONCLUSION="$(gh run view "$RUN_ID" --repo "$REPO_NWO" --json conclusion --jq .conclusion)"
 [ "$CONCLUSION" = "success" ] \
-  || die "CI run $RUN_ID finished as '$CONCLUSION' — $(gh run view "$RUN_ID" --json url --jq .url)"
+  || die "CI run $RUN_ID finished as '$CONCLUSION' — $(gh run view "$RUN_ID" --repo "$REPO_NWO" --json url --jq .url)"
 
 # --- Download the artifacts ---------------------------------------------------
 note "--- Downloading artifacts ---"
@@ -157,7 +164,7 @@ for platform in "${PLATFORMS[@]}"; do
   set -- $platform
   name="${ARTIFACT_PREFIX}_${VERSION}_$1_$2"
   note "  $name"
-  gh run download "$RUN_ID" --name "$name" --dir "$DIST_DIR" \
+  gh run download "$RUN_ID" --repo "$REPO_NWO" --name "$name" --dir "$DIST_DIR" \
     || die "artifact '$name' missing from run $RUN_ID"
 done
 
